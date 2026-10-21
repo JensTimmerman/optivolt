@@ -37,7 +37,7 @@ All options are set in the add-on's **Configuration** tab.
 | `mqtt_port` | no | `0` (auto) | Port of the Victron MQTT broker. `0` means auto: `8883` with TLS, `1883` without. An explicit port always wins. |
 | `mqtt_username` | no | empty | MQTT username, if your broker requires one. |
 | `mqtt_password` | no | empty | MQTT password, if your broker requires one. |
-| `mqtt_tls` | no | `false` | Connect to the broker over TLS (`mqtts`). Required for a Cerbo/Venus broker in secure mode. |
+| `mqtt_tls` | no | `false` | Connect to the broker over TLS (`mqtts`). Required for a Cerbo/Venus broker in secure mode. Accepts `true` or `false` (case-insensitive); any other value is rejected. |
 | `mqtt_tls_verify` | no | `true` | Verify the broker certificate. Set to `false` only for debugging; see the security warning below. |
 | `mqtt_tls_ca` | no | empty | CA certificate (PEM) used to verify the broker. Paste the PEM here. |
 | `mqtt_tls_fingerprint` | no | empty | Optional SHA-256 certificate fingerprint pin. Requires `mqtt_tls_ca` and `mqtt_tls_verify: true`. |
@@ -50,22 +50,26 @@ go to **Settings → Services → MQTT**.
 
 ### TLS / secure Cerbo
 
-If your Cerbo/Venus broker is in secure mode, enable `mqtt_tls` and supply the
-CA certificate that signed the broker's certificate in `mqtt_tls_ca`. Leave
-`mqtt_port` at `0` to use `8883`, or set the port explicitly.
+If your Cerbo/Venus broker is in secure mode, enable `mqtt_tls` (accepted
+values are `true` or `false`, case-insensitive; anything else is rejected) and
+supply the CA certificate that signed the broker's certificate in
+`mqtt_tls_ca`.
 
-Optionally pin the broker certificate with `mqtt_tls_fingerprint`. Get the
-SHA-256 fingerprint directly from the broker:
+When enabling TLS on an existing install, set `mqtt_port` to `0` (or `8883`).
+A saved `1883` is treated as an explicit port and will still be used, so the
+connection will fail against a TLS-only broker.
 
-```bash
-openssl s_client -connect <cerbo-host>:8883 </dev/null 2>/dev/null \
-  | openssl x509 -fingerprint -sha256 -noout
-```
+Optionally pin the broker certificate with `mqtt_tls_fingerprint`. Obtain the
+SHA-256 fingerprint out-of-band — from the Cerbo/Venus console or VRM — rather
+than with `openssl s_client` against the live host, which is
+trust-on-first-use and would accept whatever certificate the host presents.
 
 Copy only the hex value after `SHA256 Fingerprint=`; colons, spaces, and case
-are ignored. A fingerprint is only enforced together with a CA and
-`mqtt_tls_verify: true`; the add-on refuses to start with an unsafe
-combination.
+are ignored. A fingerprint intentionally replaces Node's hostname check: the
+pin establishes possession of that exact leaf certificate, not that the
+certificate belongs to the hostname. It is only enforced together with a CA
+and `mqtt_tls_verify: true`; if the combination is unsafe, MQTT operations
+fail until the configuration is fixed.
 
 To obtain the CA PEM, export the certificate chain from the Cerbo (for example
 with `openssl s_client -showcerts -connect <cerbo-host>:8883 </dev/null`) and

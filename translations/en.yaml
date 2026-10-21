@@ -34,7 +34,8 @@ configuration:
     name: Verify MQTT TLS Certificate
     description: >
       Verify the broker certificate. Keep this enabled. Setting it to `false`
-      disables authentication and cannot be combined with a fingerprint.
+      disables certificate verification and cannot be combined with a
+      fingerprint.
   mqtt_tls_ca:
     name: Victron MQTT CA Certificate
     description: >
