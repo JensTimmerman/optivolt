@@ -71,12 +71,44 @@ certificate belongs to the hostname. It is only enforced together with a CA
 and `mqtt_tls_verify: true`; if the combination is unsafe, MQTT operations
 fail until the configuration is fixed.
 
-To obtain the CA PEM, export the certificate chain from the Cerbo (for example
-with `openssl s_client -showcerts -connect <cerbo-host>:8883 </dev/null`) and
-save the CA certificate — the self-signed root, not the broker's leaf
-certificate — as PEM text in `mqtt_tls_ca`. If the configuration form rejects a
-multiline value, paste the PEM as a single line with literal `\n` escapes
-between the header, body, and footer; the server converts them to newlines.
+On a Cerbo/Venus in secure mode the broker presents a self-signed certificate,
+so one command saves exactly what `mqtt_tls_ca` needs:
+
+```bash
+openssl s_client -connect <cerbo-host>:8883 </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > cerbo-ca.pem
+```
+
+Check what you got before pasting it:
+
+```bash
+openssl x509 -in cerbo-ca.pem -noout -subject -issuer -dates -fingerprint -sha256
+```
+
+The subject and issuer are the same for a self-signed certificate. If your
+installation uses a private CA instead, the first command saves the broker's
+leaf and the root comes later in the chain. Save every certificate separately
+and use the last one as `cerbo-ca.pem`:
+
+```bash
+openssl s_client -connect <cerbo-host>:8883 -showcerts </dev/null 2>/dev/null \
+  | awk '/BEGIN CERTIFICATE/{n++; f="chain-" n ".pem"} f {print > f} /END CERTIFICATE/{f=""}'
+for f in chain-*.pem; do cp "$f" cerbo-ca.pem; done
+ls chain-*.pem
+```
+
+For a private CA the root has matching subject and issuer; if the last file is
+still an intermediate, get the root from your CA instead.
+
+Paste the PEM into `mqtt_tls_ca`. If the configuration form rejects a multiline
+value, paste it as a single line with literal `\n` escapes:
+
+```bash
+perl -0pe 's/\n+\z//; s/\n/\\n/g' cerbo-ca.pem; echo
+```
+
+Fetching the certificate this way is trust-on-first-use; if you need certainty,
+compare the printed fingerprint with the one shown on the Cerbo console or VRM.
 
 > **Warning:** `mqtt_tls_verify: false` disables certificate verification, so
 > the connection is not authenticated and is vulnerable to interception. It is
