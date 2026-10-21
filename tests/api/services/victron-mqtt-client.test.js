@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { VictronMqttClient } from '../../../api/services/victron-mqtt-client.ts';
+import { createHash } from 'node:crypto';
+import {
+  VictronMqttClient,
+  buildMqttConnectOptions,
+} from '../../../api/services/victron-mqtt-client.ts';
 
 // Fake broker: records publishes and answers R/<serial>/<path> requests with a
 // canned value on the matching N/ topic, the way a GX device does.
@@ -42,6 +46,112 @@ describe('VictronMqttClient', () => {
   });
 
   const client = (config = {}) => new VictronMqttClient({ serial: 'abc123', ...config });
+  const ca = '-----BEGIN CERTIFICATE-----\ntest-only\n-----END CERTIFICATE-----';
+  const sha256 = (buffer) => createHash('sha256').update(buffer).digest('hex');
+
+  it('connects over mqtts with a CA and fingerprint pin', async () => {
+    const raw = Buffer.from('test-certificate');
+    const c = client({
+      host: 'cerbo.local',
+      port: 8883,
+      tls: true,
+      tlsCa: ca,
+      tlsFingerprint: sha256(raw),
+    });
+
+    await c.writeSetting('some/path', 1);
+
+    const [url, options] = connectAsync.mock.calls[0];
+    expect(url).toBe('mqtts://cerbo.local:8883');
+    expect(options.rejectUnauthorized).toBe(true);
+    expect(options.ca).toEqual([ca]);
+    expect(typeof options.checkServerIdentity).toBe('function');
+    expect(options.checkServerIdentity('cerbo.local', { raw })).toBeUndefined();
+  });
+
+  it('connects over plain mqtt without any TLS options', async () => {
+    const c = client({ host: 'cerbo.local', port: 1883, username: 'user', password: 'pass' });
+
+    await c.writeSetting('some/path', 1);
+
+    const [url, options] = connectAsync.mock.calls[0];
+    expect(url).toBe('mqtt://cerbo.local:1883');
+    expect(Object.keys(options).sort()).toEqual(['password', 'reconnectPeriod', 'username']);
+    expect(options).not.toHaveProperty('rejectUnauthorized');
+    expect(options).not.toHaveProperty('ca');
+    expect(options).not.toHaveProperty('checkServerIdentity');
+  });
+
+  it('lets an explicit plain protocol override tls: true', async () => {
+    const c = client({ host: 'cerbo.local', port: 1883, protocol: 'mqtt', tls: true });
+
+    await c.writeSetting('some/path', 1);
+
+    const [url, options] = connectAsync.mock.calls[0];
+    expect(url).toBe('mqtt://cerbo.local:1883');
+    expect(options).not.toHaveProperty('rejectUnauthorized');
+    expect(options).not.toHaveProperty('ca');
+    expect(options).not.toHaveProperty('checkServerIdentity');
+  });
+
+  it('derives mqtts from an explicit protocol when tls is unset', async () => {
+    const c = client({ host: 'cerbo.local', port: 8883, protocol: 'mqtts', tlsCa: ca });
+
+    await c.writeSetting('some/path', 1);
+
+    const [url, options] = connectAsync.mock.calls[0];
+    expect(url).toBe('mqtts://cerbo.local:8883');
+    expect(options.rejectUnauthorized).toBe(true);
+    expect(options.ca).toEqual([ca]);
+  });
+
+  it('accepts a matching fingerprint and rejects a mismatching one', () => {
+    const raw = Buffer.from('certificate');
+    const expected = sha256(raw);
+
+    const matching = buildMqttConnectOptions({
+      tls: true,
+      tlsCa: ca,
+      tlsFingerprint: expected.toUpperCase().replace(/(..)/g, '$1:'),
+    });
+    expect(matching.options.checkServerIdentity('cerbo.local', { raw })).toBeUndefined();
+
+    const wrong = sha256(Buffer.from('other-certificate'));
+    const mismatching = buildMqttConnectOptions({ tls: true, tlsCa: ca, tlsFingerprint: wrong });
+    const error = mismatching.options.checkServerIdentity('cerbo.local', { raw });
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain(expected);
+    expect(error.message).toContain(wrong);
+  });
+
+  it.each([
+    ['fingerprint without a CA', { tls: true, tlsFingerprint: 'aabb' }],
+    ['fingerprint with tlsVerify: false', { tls: true, tlsCa: ca, tlsFingerprint: 'aabb', tlsVerify: false }],
+    ['fingerprint with TLS disabled', { tls: false, tlsCa: ca, tlsFingerprint: 'aabb' }],
+    ['CA with TLS disabled', { tls: false, tlsCa: ca }],
+  ])('fails closed for %s', (_label, config) => {
+    expect(() => new VictronMqttClient(config)).toThrow();
+    expect(() => buildMqttConnectOptions(config)).toThrow();
+  });
+
+  it('passes rejectUnauthorized: false when verification is explicitly disabled', async () => {
+    const c = client({
+      host: 'cerbo.local',
+      port: 8883,
+      tls: true,
+      tlsCa: ca,
+      tlsVerify: false,
+    });
+
+    await c.writeSetting('some/path', 1);
+
+    const [url, options] = connectAsync.mock.calls[0];
+    expect(url).toBe('mqtts://cerbo.local:8883');
+    expect(options.rejectUnauthorized).toBe(false);
+    expect(options.ca).toEqual([ca]);
+    expect(options).not.toHaveProperty('checkServerIdentity');
+  });
 
   it('publishes every field of a schedule slot as its own setting write', async () => {
     await client().writeScheduleSlot(2, {
