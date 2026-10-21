@@ -100,6 +100,13 @@ ls chain-*.pem
 For a private CA the root has matching subject and issuer; if the last file is
 still an intermediate, get the root from your CA instead.
 
+The Cerbo certificate is self-signed and usually has no `subjectAltName`; its
+subject is a plain `CN=`, for example `CN=venus.local`. While `mqtt_tls_verify`
+is on, `mqtt_host` must therefore match that name: connecting by IP address
+fails with `ERR_TLS_CERT_ALTNAME_INVALID` because the name cannot be matched. A
+fingerprint pin lifts that requirement, so an IP address works when the pin
+matches.
+
 Paste the PEM into `mqtt_tls_ca`. If the configuration form rejects a multiline
 value, paste it as a single line with literal `\n` escapes:
 
