@@ -32,14 +32,29 @@ export interface MqttEnv {
   port: number;
   username: string;
   password: string;
+  tls: boolean;
+  tlsVerify: boolean;
+  tlsCa: string | undefined;
+  tlsFingerprint: string | undefined;
 }
 
 export function getMqttEnv(): MqttEnv {
+  const tls = process.env.MQTT_TLS === 'true';
+  const rawPort = Number(process.env.MQTT_PORT);
+  const port = Number.isInteger(rawPort) && rawPort > 0 ? rawPort : tls ? 8883 : 1883;
+  const tlsCa = (process.env.MQTT_TLS_CA ?? '').trim().replace(/\\n/g, '\n') || undefined;
+  const tlsFingerprint =
+    (process.env.MQTT_TLS_FINGERPRINT ?? '').trim().replace(/[\s:]/g, '').toLowerCase() || undefined;
+
   return {
     host: process.env.MQTT_HOST ?? 'venus.local',
-    port: Number(process.env.MQTT_PORT ?? '1883'),
+    port,
     username: process.env.MQTT_USERNAME ?? '',
     password: process.env.MQTT_PASSWORD ?? '',
+    tls,
+    tlsVerify: process.env.MQTT_TLS_VERIFY !== 'false',
+    tlsCa,
+    tlsFingerprint,
   };
 }
 
