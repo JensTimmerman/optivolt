@@ -1,9 +1,32 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   VictronMqttClient,
   buildMqttConnectOptions,
+  validateTlsConfig,
 } from '../../../api/services/victron-mqtt-client.ts';
+import {
+  readVictronSetting,
+  shutdownVictronClient,
+} from '../../../api/services/mqtt-service.ts';
+
+const envState = vi.hoisted(() => ({
+  mqtt: {
+    host: 'cerbo.local',
+    port: 8883,
+    username: 'user',
+    password: 'pass',
+    tls: true,
+    tlsVerify: true,
+    tlsCa: '-----BEGIN CERTIFICATE-----\ntest-only\n-----END CERTIFICATE-----',
+    tlsFingerprint: 'ab'.repeat(32),
+  },
+}));
+
+vi.mock('../../../api/env.ts', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, getMqttEnv: () => envState.mqtt };
+});
 
 // Fake broker: records publishes and answers R/<serial>/<path> requests with a
 // canned value on the matching N/ topic, the way a GX device does.
@@ -82,16 +105,16 @@ describe('VictronMqttClient', () => {
     expect(options).not.toHaveProperty('checkServerIdentity');
   });
 
-  it('lets an explicit plain protocol override tls: true', async () => {
-    const c = client({ host: 'cerbo.local', port: 1883, protocol: 'mqtt', tls: true });
-
-    await c.writeSetting('some/path', 1);
-
-    const [url, options] = connectAsync.mock.calls[0];
-    expect(url).toBe('mqtt://cerbo.local:1883');
-    expect(options).not.toHaveProperty('rejectUnauthorized');
-    expect(options).not.toHaveProperty('ca');
-    expect(options).not.toHaveProperty('checkServerIdentity');
+  it('rejects tls: true combined with an explicit plain protocol', () => {
+    for (const protocol of ['mqtt', 'ws']) {
+      const config = { host: 'cerbo.local', protocol, tls: true };
+      expect(() => new VictronMqttClient(config)).toThrow(
+        new RegExp(`conflicts with protocol "${protocol}"`),
+      );
+      expect(() => buildMqttConnectOptions(config)).toThrow(
+        new RegExp(`conflicts with protocol "${protocol}"`),
+      );
+    }
   });
 
   it('derives mqtts from an explicit protocol when tls is unset', async () => {
@@ -103,6 +126,21 @@ describe('VictronMqttClient', () => {
     expect(url).toBe('mqtts://cerbo.local:8883');
     expect(options.rejectUnauthorized).toBe(true);
     expect(options.ca).toEqual([ca]);
+  });
+
+  it('defaults the port from the effective TLS mode, with an explicit port always winning', () => {
+    expect(buildMqttConnectOptions({ host: 'cerbo.local', tls: true }).url)
+      .toBe('mqtts://cerbo.local:8883');
+    expect(buildMqttConnectOptions({ host: 'cerbo.local' }).url)
+      .toBe('mqtt://cerbo.local:1883');
+    expect(buildMqttConnectOptions({ host: 'cerbo.local', protocol: 'mqtts' }).url)
+      .toBe('mqtts://cerbo.local:8883');
+    expect(buildMqttConnectOptions({ host: 'cerbo.local', port: 1234, tls: true }).url)
+      .toBe('mqtts://cerbo.local:1234');
+
+    expect(new VictronMqttClient({ tls: true, tlsCa: ca }).port).toBe(8883);
+    expect(new VictronMqttClient({}).port).toBe(1883);
+    expect(new VictronMqttClient({ port: 1234, tls: true }).port).toBe(1234);
   });
 
   it('accepts a matching fingerprint and rejects a mismatching one', () => {
@@ -126,13 +164,25 @@ describe('VictronMqttClient', () => {
   });
 
   it.each([
-    ['fingerprint without a CA', { tls: true, tlsFingerprint: 'aabb' }],
-    ['fingerprint with tlsVerify: false', { tls: true, tlsCa: ca, tlsFingerprint: 'aabb', tlsVerify: false }],
-    ['fingerprint with TLS disabled', { tls: false, tlsCa: ca, tlsFingerprint: 'aabb' }],
+    ['fingerprint without a CA', { tls: true, tlsFingerprint: 'a'.repeat(64) }],
+    ['fingerprint with tlsVerify: false', { tls: true, tlsCa: ca, tlsFingerprint: 'a'.repeat(64), tlsVerify: false }],
+    ['fingerprint with TLS disabled', { tls: false, tlsCa: ca, tlsFingerprint: 'a'.repeat(64) }],
     ['CA with TLS disabled', { tls: false, tlsCa: ca }],
   ])('fails closed for %s', (_label, config) => {
     expect(() => new VictronMqttClient(config)).toThrow();
     expect(() => buildMqttConnectOptions(config)).toThrow();
+  });
+
+  it.each([
+    ['separator-only', '::'],
+    ['too short', 'aabbcc'],
+    ['SHA-1 length', 'ab'.repeat(20)],
+    ['non-hex', 'z'.repeat(64)],
+  ])('rejects a malformed fingerprint (%s)', (_label, tlsFingerprint) => {
+    const config = { tls: true, tlsCa: ca, tlsFingerprint };
+    expect(() => validateTlsConfig(config)).toThrow(/64-character SHA-256/);
+    expect(() => new VictronMqttClient(config)).toThrow(/64-character SHA-256/);
+    expect(() => buildMqttConnectOptions(config)).toThrow(/64-character SHA-256/);
   });
 
   it('passes rejectUnauthorized: false when verification is explicitly disabled', async () => {
@@ -219,5 +269,25 @@ describe('VictronMqttClient', () => {
     await c.close();
     await c.writeSetting('some/path', 3);
     expect(connectAsync).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('mqtt-service TLS env forwarding', () => {
+  afterEach(async () => {
+    await shutdownVictronClient();
+  });
+
+  it('forwards tls, tlsVerify, tlsCa, and tlsFingerprint from the environment', async () => {
+    await expect(readVictronSetting('some/path', { timeoutMs: 20 })).rejects.toThrow(/Timeout/);
+
+    const [url, options] = connectAsync.mock.calls.at(-1);
+    expect(url).toBe('mqtts://cerbo.local:8883');
+    expect(options.rejectUnauthorized).toBe(true);
+    expect(options.ca).toEqual([envState.mqtt.tlsCa]);
+    expect(typeof options.checkServerIdentity).toBe('function');
+
+    const error = options.checkServerIdentity('cerbo.local', { raw: Buffer.from('not-pinned') });
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/fingerprint mismatch/i);
   });
 });

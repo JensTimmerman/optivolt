@@ -111,18 +111,42 @@ describe('getMqttEnv port', () => {
     process.env.MQTT_PORT = '1883abc';
     expect(getMqttEnv().port).toBe(1883);
   });
+
+  it('rejects exponent, hex, decimal and out-of-range ports and falls back to auto', () => {
+    for (const value of ['1e3', '0x10', '18.83', '70000', '65536', ' 1883']) {
+      process.env.MQTT_PORT = value;
+      expect(getMqttEnv().port).toBe(1883);
+      process.env.MQTT_TLS = 'true';
+      expect(getMqttEnv().port).toBe(8883);
+      delete process.env.MQTT_TLS;
+    }
+    process.env.MQTT_PORT = '65535';
+    expect(getMqttEnv().port).toBe(65535);
+  });
 });
 
 describe('getMqttEnv TLS options', () => {
-  it('enables TLS only for the literal string true', () => {
+  it('parses TLS strictly and treats unset or empty as false', () => {
+    expect(getMqttEnv().tls).toBe(false);
+    process.env.MQTT_TLS = '';
     expect(getMqttEnv().tls).toBe(false);
     process.env.MQTT_TLS = 'false';
     expect(getMqttEnv().tls).toBe(false);
-    process.env.MQTT_TLS = 'TRUE';
+    process.env.MQTT_TLS = 'FALSE';
     expect(getMqttEnv().tls).toBe(false);
+    process.env.MQTT_TLS = 'TRUE';
+    expect(getMqttEnv().tls).toBe(true);
     process.env.MQTT_TLS = 'true';
     expect(getMqttEnv().tls).toBe(true);
   });
+
+  it.each(['1', '0', 'yes', 'no', 'on', 'off', 'enabled'])(
+    'rejects MQTT_TLS=%s instead of silently falling back to plaintext',
+    (value) => {
+      process.env.MQTT_TLS = value;
+      expect(() => getMqttEnv()).toThrow(/MQTT_TLS must be "true" or "false"/);
+    },
+  );
 
   it('verifies TLS by default and only disables it for the literal string false', () => {
     expect(getMqttEnv().tlsVerify).toBe(true);
@@ -142,17 +166,34 @@ describe('getMqttEnv TLS options', () => {
     expect(getMqttEnv().tlsCa).toBe('line1\nline2');
   });
 
+  it('treats a literal escaped newline as empty after expansion and trimming', () => {
+    process.env.MQTT_TLS_CA = '\\n';
+    expect(getMqttEnv().tlsCa).toBeUndefined();
+    process.env.MQTT_TLS_CA = '\\n  \\n';
+    expect(getMqttEnv().tlsCa).toBeUndefined();
+  });
+
   it('preserves real newlines in a PEM', () => {
     const pem = '-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----';
     process.env.MQTT_TLS_CA = pem;
     expect(getMqttEnv().tlsCa).toBe(pem);
   });
 
-  it('normalises the fingerprint to lowercase hex without separators', () => {
+  it('normalises a valid fingerprint to lowercase hex without separators', () => {
     expect(getMqttEnv().tlsFingerprint).toBeUndefined();
     process.env.MQTT_TLS_FINGERPRINT = '   ';
     expect(getMqttEnv().tlsFingerprint).toBeUndefined();
-    process.env.MQTT_TLS_FINGERPRINT = 'AA:BB: CC';
-    expect(getMqttEnv().tlsFingerprint).toBe('aabbcc');
+    const hex = 'ab'.repeat(32);
+    process.env.MQTT_TLS_FINGERPRINT = hex.toUpperCase().replace(/(..)/g, '$1:');
+    expect(getMqttEnv().tlsFingerprint).toBe(hex);
+    process.env.MQTT_TLS_FINGERPRINT = hex.replace(/(.{16})/g, '$1 ').trim();
+    expect(getMqttEnv().tlsFingerprint).toBe(hex);
+  });
+
+  it('rejects malformed fingerprints instead of silently disabling the pin', () => {
+    for (const value of ['::', 'aabbcc', 'AB:BB: CC', 'ab'.repeat(20), 'z'.repeat(64)]) {
+      process.env.MQTT_TLS_FINGERPRINT = value;
+      expect(() => getMqttEnv()).toThrow(/64-character SHA-256 hex string/);
+    }
   });
 });

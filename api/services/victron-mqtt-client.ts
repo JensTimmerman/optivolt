@@ -47,7 +47,14 @@ function resolveProtocol(config: VictronMqttConfig): string {
 }
 
 function normalizeFingerprint(value: string | undefined): string | undefined {
-  return value?.replace(/[\s:]/g, '').toLowerCase() || undefined;
+  if (value === undefined || value.trim() === '') return undefined;
+  const normalized = value.replace(/[\s:]/g, '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(
+      'MQTT TLS fingerprint must be a 64-character SHA-256 hex string (colons and whitespace are ignored)',
+    );
+  }
+  return normalized;
 }
 
 function hasTlsCa(ca: VictronMqttConfig['tlsCa']): ca is string | Buffer {
@@ -56,6 +63,12 @@ function hasTlsCa(ca: VictronMqttConfig['tlsCa']): ca is string | Buffer {
 }
 
 export function validateTlsConfig(config: VictronMqttConfig): void {
+  if (config.tls === true && config.protocol !== undefined && config.protocol !== 'mqtts') {
+    throw new Error(
+      `MQTT TLS requires a TLS protocol; "tls: true" conflicts with protocol "${config.protocol}"`,
+    );
+  }
+
   const effectiveTls = resolveProtocol(config) === 'mqtts';
   const hasFingerprint = normalizeFingerprint(config.tlsFingerprint) !== undefined;
   const caSupplied = hasTlsCa(config.tlsCa);
@@ -85,7 +98,7 @@ export function buildMqttConnectOptions(
   const protocol = resolveProtocol(config);
   const effectiveTls = protocol === 'mqtts';
   const host = config.host ?? 'venus.local';
-  const port = config.port ?? 1883;
+  const port = config.port ?? (effectiveTls ? 8883 : 1883);
 
   const options: VictronMqttConnectOptions = {
     username: config.username || undefined,
@@ -97,8 +110,7 @@ export function buildMqttConnectOptions(
     options.rejectUnauthorized = config.tlsVerify !== false;
 
     if (hasTlsCa(config.tlsCa)) {
-      const ca = config.tlsCa;
-      options.ca = typeof ca === 'string' ? [ca] : [ca];
+      options.ca = [config.tlsCa] as string[] | Buffer[];
     }
 
     const fingerprint = normalizeFingerprint(config.tlsFingerprint);
@@ -129,7 +141,6 @@ export class VictronMqttClient {
   port: number;
   username: string | undefined;
   password: string | undefined;
-  protocol: string | undefined;
   reconnectPeriod: number;
   serial: string | null;
   private _config: VictronMqttConfig;
@@ -141,19 +152,17 @@ export class VictronMqttClient {
 
     const {
       host = 'venus.local',
-      port = 1883,
+      port,
       username = '',
       password = '',
-      protocol,             // 'mqtt', 'mqtts', 'ws', 'wss', ...
       reconnectPeriod = 0,  // 0 = no auto reconnect by default
       serial,               // optional: if you already know the portal id
     } = config;
 
     this.host = host;
-    this.port = port;
+    this.port = port ?? (resolveProtocol(config) === 'mqtts' ? 8883 : 1883);
     this.username = username || undefined;
     this.password = password || undefined;
-    this.protocol = protocol;
     this.reconnectPeriod = reconnectPeriod;
     this._config = config;
 
