@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash, X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, connect as tlsConnect } from 'node:tls';
+import mqtt from 'mqtt';
 import {
   buildMqttConnectOptions,
   validateTlsConfig,
@@ -60,9 +61,11 @@ describe('Victron MQTT TLS handshake', () => {
   let port;
   let connections;
   let sockets;
+  let applicationBytes;
 
   beforeEach(async () => {
     connections = 0;
+    applicationBytes = 0;
     sockets = new Set();
     server = createServer({ key: keyPem, cert: certPem, requestCert: false });
     server.on('tlsClientError', () => {});
@@ -70,6 +73,11 @@ describe('Victron MQTT TLS handshake', () => {
       connections += 1;
       sockets.add(socket);
       socket.on('close', () => sockets.delete(socket));
+    });
+    server.on('secureConnection', (socket) => {
+      socket.on('data', (chunk) => {
+        applicationBytes += chunk.length;
+      });
     });
 
     await new Promise((resolve, reject) => {
@@ -123,6 +131,23 @@ describe('Victron MQTT TLS handshake', () => {
     expect(error.message).toMatch(/certificate fingerprint mismatch/i);
     expect(error.message).toContain(wrongFingerprint);
   });
+
+  it('rejects a real mqtt connect with a wrong fingerprint without application bytes', async () => {
+    const wrongFingerprint = `${expectedFingerprint.slice(0, -1)}${
+      expectedFingerprint.endsWith('0') ? '1' : '0'
+    }`;
+    const built = build({ tlsFingerprint: wrongFingerprint });
+
+    await expect(
+      mqtt.connectAsync(built.url, {
+        ...built.options,
+        connectTimeout: HANDSHAKE_TIMEOUT_MS,
+        reconnectPeriod: 0,
+      }),
+    ).rejects.toThrow(/fingerprint mismatch/i);
+
+    expect(applicationBytes).toBe(0);
+  }, 10_000);
 
   it('rejects a self-signed server when no CA is supplied', async () => {
     const built = build({ tlsCa: undefined });
